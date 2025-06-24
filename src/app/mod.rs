@@ -20,7 +20,7 @@
 //!
 //! - **`State`**: The core application state that manages the current blockchain state,
 //!   handles block proposals, and interfaces with Reth's storage layer
-//! - **`node`**: Defines the `MalachiteNode` type that integrates with Reth's node infrastructure
+//! - **`node`**: Defines the `RethNode` type that integrates with Reth's node infrastructure
 //! - **`run`**: Contains the main application loop that processes consensus messages
 //!
 //! ## Consensus Interface

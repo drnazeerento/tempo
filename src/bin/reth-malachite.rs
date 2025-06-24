@@ -1,11 +1,11 @@
 use clap::{Args, Parser};
 use malachitebft_app::node::Node;
 use reth::builder::NodeHandle;
-use reth_malachite::app::node::MalachiteNode;
+use reth_malachite::app::node::RethNode;
 use reth_malachite::app::{Config, Genesis, State, ValidatorInfo};
 use reth_malachite::cli::{Cli, MalachiteChainSpecParser};
 use reth_malachite::consensus::config::EngineConfig;
-use reth_malachite::consensus::node::MalachiteNodeImpl;
+use reth_malachite::consensus::node::MalachiteNode;
 use reth_malachite::context::MalachiteContext;
 use reth_malachite::types::Address;
 use std::path::PathBuf;
@@ -39,11 +39,11 @@ fn main() -> eyre::Result<()> {
             let state = State::new(ctx.clone(), config, genesis.clone(), address);
 
             // Launch the Reth node
-            let malachite_node = MalachiteNode::new(state.clone());
+            let reth_node = RethNode::new(state.clone());
             let NodeHandle {
                 node: _,
                 node_exit_future,
-            } = builder.node(malachite_node).launch().await?;
+            } = builder.node(reth_node).launch().await?;
 
             // Get the home directory
             let home_dir = PathBuf::from("./data"); // In production, use proper data dir
@@ -56,11 +56,11 @@ fn main() -> eyre::Result<()> {
             );
 
             // Create the Malachite consensus node
-            let malachite_node_impl = MalachiteNodeImpl::new(engine_config, home_dir, state);
+            let malachite_node = MalachiteNode::new(engine_config, home_dir, state);
 
             // Start the consensus engine using the run method
             let consensus_future = tokio::spawn(async move {
-                if let Err(e) = malachite_node_impl.run().await {
+                if let Err(e) = malachite_node.run().await {
                     tracing::error!("Consensus engine error: {}", e);
                 }
             });

@@ -13,15 +13,15 @@ use reth_trie_db::MerklePatriciaTrie;
 use tokio::sync::{broadcast, mpsc};
 use tracing::warn;
 
-/// Type configuration for a regular Malachite node.
+/// Type configuration for a regular Reth node.
 #[derive(Debug, Clone)]
-pub struct MalachiteNode {
+pub struct RethNode {
     // Consensus state
     pub state: State,
 }
 
-impl MalachiteNode {
-    /// Create a new MalachiteNode
+impl RethNode {
+    /// Create a new RethNode
     pub fn new(state: State) -> Self {
         Self { state }
     }
@@ -33,7 +33,7 @@ pub struct MalachitePayloadServiceBuilder;
 
 impl<Node, Pool, Evm> PayloadServiceBuilder<Node, Pool, Evm> for MalachitePayloadServiceBuilder
 where
-    Node: FullNodeTypes<Types = MalachiteNode>,
+    Node: FullNodeTypes<Types = RethNode>,
     Pool: TransactionPool,
     Evm: ConfigureEvm,
 {
@@ -66,7 +66,7 @@ where
     }
 }
 
-impl NodeTypes for MalachiteNode {
+impl NodeTypes for RethNode {
     type Primitives = reth_ethereum_primitives::EthPrimitives;
     type ChainSpec = ChainSpec;
     type StateCommitment = MerklePatriciaTrie;
@@ -74,7 +74,7 @@ impl NodeTypes for MalachiteNode {
     type Payload = reth_node_ethereum::EthEngineTypes;
 }
 
-impl<N> Node<N> for MalachiteNode
+impl<N> Node<N> for RethNode
 where
     N: FullNodeTypes<Types = Self>,
 {

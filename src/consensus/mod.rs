@@ -34,7 +34,7 @@
 //!
 //! ## Key Components (to be implemented)
 //!
-//! - **`MalachiteNodeImpl`**: Implements Malachite's `Node` trait for configuration
+//! - **`MalachiteNode`**: Implements Malachite's `Node` trait for configuration
 //! - **`run_consensus_handler`**: The main loop that processes consensus messages
 //! - **`ConsensusEngine`**: Manages the consensus engine lifecycle
 //! - **Configuration types**: Network, WAL, metrics settings for Malachite
@@ -57,7 +57,7 @@ use std::path::PathBuf;
 use tracing::info;
 
 pub use config::{EngineConfig, NetworkConfig, NodeConfig, WalConfig};
-pub use node::{ConsensusHandle, MalachiteNodeImpl};
+pub use node::{ConsensusHandle, MalachiteNode};
 
 /// Starts the Malachite consensus engine
 ///
@@ -84,7 +84,7 @@ pub async fn start_consensus_engine(
     );
 
     // Create the node implementation
-    let node = MalachiteNodeImpl::new(config, home_dir, app_state);
+    let node = MalachiteNode::new(config, home_dir, app_state);
 
     // Start the consensus engine
     let handle = node.start().await?;

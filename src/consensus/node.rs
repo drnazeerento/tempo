@@ -21,7 +21,7 @@ use tokio::task::JoinHandle;
 
 /// Implementation of Malachite's Node trait for reth-malachite
 #[derive(Clone)]
-pub struct MalachiteNodeImpl {
+pub struct MalachiteNode {
     /// Engine configuration
     pub config: EngineConfig,
     /// Path to the home directory
@@ -34,7 +34,7 @@ pub struct MalachiteNodeImpl {
     pub app_state: State,
 }
 
-impl MalachiteNodeImpl {
+impl MalachiteNode {
     /// Create a new node implementation
     pub fn new(config: EngineConfig, home_dir: PathBuf, app_state: State) -> Self {
         let genesis_file = home_dir.join("genesis.json");
@@ -75,7 +75,7 @@ impl NodeHandle<MalachiteContext> for ConsensusHandle {
 }
 
 #[async_trait]
-impl Node for MalachiteNodeImpl {
+impl Node for MalachiteNode {
     type Context = MalachiteContext;
     type Config = NodeConfig;
     type Genesis = Genesis;
@@ -190,7 +190,7 @@ impl Node for MalachiteNodeImpl {
     }
 }
 
-impl CanMakeGenesis for MalachiteNodeImpl {
+impl CanMakeGenesis for MalachiteNode {
     fn make_genesis(&self, validators: Vec<(PublicKey, VotingPower)>) -> Self::Genesis {
         // Create genesis with the given validators
         let validator_infos = validators
@@ -209,7 +209,7 @@ impl CanMakeGenesis for MalachiteNodeImpl {
     }
 }
 
-impl CanGeneratePrivateKey for MalachiteNodeImpl {
+impl CanGeneratePrivateKey for MalachiteNode {
     fn generate_private_key<R>(&self, rng: R) -> PrivateKey
     where
         R: RngCore + CryptoRng,
@@ -218,13 +218,13 @@ impl CanGeneratePrivateKey for MalachiteNodeImpl {
     }
 }
 
-impl CanMakePrivateKeyFile for MalachiteNodeImpl {
+impl CanMakePrivateKeyFile for MalachiteNode {
     fn make_private_key_file(&self, private_key: PrivateKey) -> Self::PrivateKeyFile {
         private_key
     }
 }
 
-impl CanMakeConfig for MalachiteNodeImpl {
+impl CanMakeConfig for MalachiteNode {
     fn make_config(index: usize, _total: usize, _settings: MakeConfigSettings) -> Self::Config {
         // For now, return a default config
         // In production, this would generate appropriate config for node index out of total
