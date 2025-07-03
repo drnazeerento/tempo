@@ -13,9 +13,12 @@ use std::sync::Arc;
 use thiserror::Error;
 use tracing::{debug, error, trace};
 
-use super::tables::{
-    ConsensusState, DecidedValue, DecidedValues, HeightKey, ProposalKey, StoredProposal,
-    UndecidedProposals,
+use super::{
+    tables::{
+        BlockKey, Blocks, ConsensusState, DecidedValue, DecidedValues, HeightKey, ProposalKey,
+        StoredBlock, StoredProposal, UndecidedProposals,
+    },
+    BlockStore,
 };
 
 #[derive(Debug, Error)]
@@ -437,7 +440,75 @@ where
             .cursor_read::<ConsensusState>()
             .map_err(|e| StoreError::Other(format!("ConsensusState table not found: {e:?}")))?;
 
+        let _blocks_cursor = tx
+            .cursor_read::<Blocks>()
+            .map_err(|e| StoreError::Other(format!("Blocks table not found: {e:?}")))?;
+
         debug!("All consensus tables verified successfully");
+        Ok(())
+    }
+}
+
+impl<Provider> BlockStore for RethStore<Provider>
+where
+    Provider: DatabaseProviderFactory + Send + Sync,
+    Provider::Provider: Send,
+    Provider::ProviderRW: Send,
+{
+    fn store_block(&self, block: reth_primitives::Block) -> Result<()> {
+        let hash = block.header.hash_slow();
+        debug!("Storing block with hash: {}", hash);
+
+        let mut provider = self.provider_rw()?;
+
+        let key = BlockKey::from(hash);
+        let stored_block = StoredBlock { block };
+
+        provider.tx_mut().put::<Blocks>(key, stored_block)?;
+
+        provider.commit()?;
+
+        debug!("Successfully stored block with hash: {}", hash);
+        Ok(())
+    }
+
+    fn get_block(&self, hash: &alloy_primitives::B256) -> Result<Option<reth_primitives::Block>> {
+        trace!("Getting block with hash: {}", hash);
+
+        let provider = self.provider()?;
+        let key = BlockKey::from(*hash);
+
+        let result = provider.tx_ref().get::<Blocks>(key)?;
+
+        Ok(result.map(|stored| stored.block))
+    }
+
+    fn has_block(&self, hash: &alloy_primitives::B256) -> Result<bool> {
+        trace!("Checking if block exists with hash: {}", hash);
+
+        let provider = self.provider()?;
+        let key = BlockKey::from(*hash);
+
+        let mut cursor = provider.tx_ref().cursor_read::<Blocks>()?;
+        Ok(cursor.seek_exact(key)?.is_some())
+    }
+
+    fn remove_block(&self, hash: &alloy_primitives::B256) -> Result<()> {
+        debug!("Removing block with hash: {}", hash);
+
+        let mut provider = self.provider_rw()?;
+        let key = BlockKey::from(*hash);
+
+        let mut cursor = provider.tx_mut().cursor_write::<Blocks>()?;
+
+        if cursor.seek_exact(key)?.is_some() {
+            cursor.delete_current()?;
+            provider.commit()?;
+            debug!("Successfully removed block with hash: {}", hash);
+        } else {
+            trace!("Block not found for removal: {}", hash);
+        }
+
         Ok(())
     }
 }

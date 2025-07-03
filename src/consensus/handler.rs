@@ -89,13 +89,13 @@ pub async fn run_consensus_handler(
                     None => {
                         // Build a new value
                         match state.propose_value(height, round).await {
-                            Ok(proposal) => {
+                            Ok((proposal, block)) => {
                                 if reply.send(proposal.clone()).is_err() {
                                     error!("Failed to send GetValue reply");
                                 }
 
                                 // Stream the proposal parts to peers
-                                for part in state.stream_proposal(proposal, Round::Nil) {
+                                for part in state.stream_proposal(proposal, block, Round::Nil) {
                                     channels
                                         .network
                                         .send(NetworkMsg::PublishProposalPart(part))
@@ -209,9 +209,9 @@ pub async fn run_consensus_handler(
             } => {
                 info!(%height, %round, "Processing synced value");
 
-                if let Some(value) = crate::app::decode_value(value_bytes) {
+                if let Some((value, block)) = crate::app::decode_value_with_block(value_bytes) {
                     // First validate the block through the engine
-                    match state.validate_synced_block(&value.block).await {
+                    match state.validate_synced_block(&block).await {
                         Ok(true) => {
                             // Block is valid, create and store the proposal
                             let proposed_value =
@@ -224,9 +224,10 @@ pub async fn run_consensus_handler(
                                     validity: Validity::Valid,
                                 };
 
-                            // Store the synced value
-                            if let Err(e) =
-                                state.store_synced_proposal(proposed_value.clone()).await
+                            // Store the synced value with its block
+                            if let Err(e) = state
+                                .store_synced_proposal(proposed_value.clone(), block)
+                                .await
                             {
                                 error!(%e, "Failed to store synced proposal");
                             }
@@ -300,19 +301,36 @@ pub async fn run_consensus_handler(
                     .await
                 {
                     Ok(Some(proposal)) => {
-                        let locally_proposed =
-                            malachitebft_app_channel::app::types::LocallyProposedValue {
+                        let locally_proposed: malachitebft_app_channel::app::types::LocallyProposedValue<
+                            MalachiteContext,
+                        > = malachitebft_app_channel::app::types::LocallyProposedValue {
                                 height,
                                 round,
                                 value: proposal.value,
                             };
 
-                        // Stream the proposal parts
-                        for part in state.stream_proposal(locally_proposed, valid_round) {
-                            channels
-                                .network
-                                .send(NetworkMsg::PublishProposalPart(part))
-                                .await?;
+                        // Retrieve the block for restreaming
+                        match state.get_block(&proposal.value.hash()).await {
+                            Ok(Some(block)) => {
+                                // Stream the proposal parts
+                                for part in
+                                    state.stream_proposal(locally_proposed, block, valid_round)
+                                {
+                                    channels
+                                        .network
+                                        .send(NetworkMsg::PublishProposalPart(part))
+                                        .await?;
+                                }
+                            }
+                            Ok(None) => {
+                                error!(
+                                    "Block not found for restreaming: {}",
+                                    proposal.value.hash()
+                                );
+                            }
+                            Err(e) => {
+                                error!("Failed to retrieve block for restreaming: {}", e);
+                            }
                         }
                     }
                     Ok(None) => {

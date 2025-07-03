@@ -32,7 +32,6 @@ use alloy_primitives::B256;
 use alloy_rpc_types_engine::{ForkchoiceState, PayloadStatusEnum};
 use bytes::Bytes;
 use eyre::Result;
-use hex;
 use malachitebft_app_channel::app::{
     streaming::{Sequence, StreamContent, StreamMessage},
     types::{LocallyProposedValue, PeerId as MalachitePeerId, ProposedValue},
@@ -363,7 +362,10 @@ impl State {
         &self,
         height: Height,
         round: Round,
-    ) -> Result<LocallyProposedValue<MalachiteContext>> {
+    ) -> Result<(
+        LocallyProposedValue<MalachiteContext>,
+        reth_primitives::Block,
+    )> {
         // 1. Get parent block timestamp for monotonic increasing timestamps
         let (parent_hash, parent_timestamp) = if height.as_u64() == 1 {
             // For genesis, use current time
@@ -379,8 +381,14 @@ impl State {
                 .await
                 .ok_or_else(|| eyre::eyre!("Parent block not found at height {}", parent_height))?;
 
-            let parent_block = &parent.value.block;
-            let parent_hash = parent_block.header.hash_slow();
+            // Get the parent block hash
+            let parent_hash = parent.value.hash();
+
+            // Retrieve the actual parent block to get its timestamp
+            let parent_block = self.store.get_block(&parent_hash).await?.ok_or_else(|| {
+                eyre::eyre!("Parent block data not found for hash {}", parent_hash)
+            })?;
+
             let parent_timestamp = parent_block.header.timestamp;
 
             (parent_hash, parent_timestamp)
@@ -429,7 +437,8 @@ impl State {
             .ok_or_else(|| eyre::eyre!("No payload found for id {:?}", payload_id))??;
 
         let sealed_block = payload.block();
-        let value = Value::new(sealed_block.clone_block());
+        let block = sealed_block.clone_block();
+        let value = Value::from(&block);
 
         debug!(
             "Proposed value for height {} round {} with payload {:?}, value_id: {}",
@@ -439,7 +448,7 @@ impl State {
             value.id()
         );
 
-        let locally_proposed = LocallyProposedValue::new(height, round, value.clone());
+        let locally_proposed = LocallyProposedValue::new(height, round, value);
 
         // Store the proposal we just built so it can be retrieved later
         let proposer = BasePeerAddress(self.address);
@@ -452,9 +461,10 @@ impl State {
             validity: Validity::Valid,
         };
 
-        self.store_built_proposal(proposed_value).await?;
+        self.store_built_proposal(proposed_value, block.clone())
+            .await?;
 
-        Ok(locally_proposed)
+        Ok((locally_proposed, block))
     }
 
     /// Processes a received proposal part and potentially returns a complete proposal
@@ -514,20 +524,27 @@ impl State {
         }
 
         // Re-assemble the proposal from its parts
-        let (value, data) = assemble_value_from_parts(parts);
+        let (value, block) = match assemble_value_from_parts(parts) {
+            Ok(result) => result,
+            Err(e) => {
+                error!("Failed to assemble proposal: {}", e);
+                return Ok(None);
+            }
+        };
 
-        // Log first 32 bytes of proposal data and total size
-        if data.len() >= 32 {
-            info!(
-                "Proposal data[0..32]: {}, total_size: {} bytes, id: {:x}",
-                hex::encode(&data[..32]),
-                data.len(),
-                value.value.id().as_u64()
-            );
-        }
+        // Log block info
+        info!(
+            "Received block: hash={}, number={}, tx_count={}, id={:x}",
+            block.header.hash_slow(),
+            block.header.number,
+            block.body.transactions.len(),
+            value.value.id().as_u64()
+        );
 
-        // Store the proposal
-        self.store.store_undecided_proposal(value.clone()).await?;
+        // Store the proposal with its block
+        self.store
+            .store_undecided_proposal(value.clone(), block)
+            .await?;
 
         Ok(Some(value))
     }
@@ -536,6 +553,7 @@ impl State {
     pub fn stream_proposal(
         &self,
         value: LocallyProposedValue<MalachiteContext>,
+        block: reth_primitives::Block,
         _pol_round: Round,
     ) -> impl Iterator<Item = StreamMessage<ProposalPart>> {
         info!("Streaming proposal for height {}", value.height);
@@ -546,8 +564,8 @@ impl State {
         let stream_id =
             malachitebft_app_channel::app::streaming::StreamId::new(Bytes::from(stream_id_bytes));
 
-        // Encode the value to bytes
-        let value_bytes = encode_value(&value.value);
+        // Encode the block to bytes for streaming
+        let value_bytes = encode_block(&block);
         info!(
             "Encoding value of {} bytes for streaming",
             value_bytes.len()
@@ -571,6 +589,7 @@ impl State {
             value.height,
             value.round,
             self.address,
+            value.value.hash(),
         ));
         parts.push(StreamMessage::new(
             stream_id.clone(),
@@ -700,13 +719,14 @@ impl State {
         };
 
         // 1. Store the decided value first (for persistence)
-        self.store
-            .store_decided_value(certificate, value.clone())
-            .await?;
+        self.store.store_decided_value(certificate, value).await?;
 
-        // 2. Convert the block to execution payload and send new_payload to validate it
-        let block = &value.block;
-        let sealed_block = reth_primitives::SealedBlock::seal_slow(block.clone());
+        // 2. Retrieve the block and convert to execution payload
+        let block =
+            self.store.get_block(&value.hash()).await?.ok_or_else(|| {
+                eyre::eyre!("Block not found for decided value: {}", value.hash())
+            })?;
+        let sealed_block = reth_primitives::SealedBlock::seal_slow(block);
         let payload =
             <reth_node_ethereum::EthEngineTypes as PayloadTypes>::block_to_payload(sealed_block);
 
@@ -723,7 +743,7 @@ impl State {
         }
 
         // 3. Update fork choice to make this block canonical
-        let block_hash = block.header.hash_slow();
+        let block_hash = value.hash();
         let forkchoice_state = ForkchoiceState {
             head_block_hash: block_hash,
             safe_block_hash: block_hash, // In Malachite with instant finality, head = safe = finalized
@@ -813,6 +833,7 @@ impl State {
     pub async fn store_synced_proposal(
         &self,
         proposal: ProposedValue<MalachiteContext>,
+        block: reth_primitives::Block,
     ) -> Result<()> {
         tracing::debug!(
             height = %proposal.height,
@@ -820,7 +841,7 @@ impl State {
             proposer = %proposal.proposer,
             "Storing synced proposal"
         );
-        self.store.store_undecided_proposal(proposal).await
+        self.store.store_undecided_proposal(proposal, block).await
     }
 
     /// Retrieves a previously stored proposal for restreaming to peers.
@@ -871,13 +892,14 @@ impl State {
     pub async fn store_built_proposal(
         &self,
         proposal: ProposedValue<MalachiteContext>,
+        block: reth_primitives::Block,
     ) -> Result<()> {
         tracing::debug!(
             height = %proposal.height,
             round = %proposal.round,
             "Storing locally built proposal"
         );
-        self.store.store_undecided_proposal(proposal).await
+        self.store.store_undecided_proposal(proposal, block).await
     }
 
     /// Gets a specific undecided proposal by height, round, and value_id.
@@ -894,13 +916,18 @@ impl State {
             .await
     }
 
+    /// Get a block by its hash from storage
+    pub async fn get_block(&self, hash: &B256) -> Result<Option<reth_primitives::Block>> {
+        self.store.get_block(hash).await
+    }
+
     /// Get the finalized block hash
     /// In Malachite, blocks have instant finality - once committed, they're immediately finalized
     async fn get_finalized_hash(&self) -> Result<B256> {
         // Get the highest decided block height from the store
         if let Some(max_height) = self.get_max_decided_height().await {
             if let Some(decided) = self.get_decided_value(max_height).await {
-                return Ok(decided.value.block.header.hash_slow());
+                return Ok(decided.value.hash());
             }
         }
 
@@ -1037,6 +1064,7 @@ pub struct StreamState {
     pub height: Height,
     pub round: Round,
     pub proposer: Option<BasePeerAddress>,
+    pub block_hash: Option<B256>,
     pub parts: Vec<Option<ProposalPart>>,
     pub total_parts: Option<usize>,
     pub seen_sequences: std::collections::HashSet<Sequence>,
@@ -1054,6 +1082,7 @@ impl StreamState {
             height: Height(0),
             round: Round::new(0),
             proposer: None,
+            block_hash: None,
             parts: Vec::new(),
             total_parts: None,
             seen_sequences: std::collections::HashSet::new(),
@@ -1075,9 +1104,10 @@ impl StreamState {
                         self.height = init.height;
                         self.round = init.round;
                         self.proposer = Some(BasePeerAddress::from(init.proposer));
+                        self.block_hash = Some(init.block_hash);
                         debug!(
-                            "Received Init: height={}, round={}, proposer set",
-                            init.height, init.round
+                            "Received Init: height={}, round={}, proposer set, block_hash={}",
+                            init.height, init.round, init.block_hash
                         );
                     }
                     ProposalPart::Data(data) => {
@@ -1125,7 +1155,7 @@ impl StreamState {
                     .filter_map(|p| p.clone())
                     .collect();
 
-                if let Some(proposer) = &self.proposer {
+                if let (Some(proposer), Some(block_hash)) = (&self.proposer, &self.block_hash) {
                     debug!(
                         "Proposal complete! Returning ProposalParts with {} parts",
                         parts.len()
@@ -1134,10 +1164,13 @@ impl StreamState {
                         height: self.height,
                         round: self.round,
                         proposer: proposer.clone(),
+                        block_hash: *block_hash,
                         parts,
                     });
                 } else {
-                    debug!("All parts received but no proposer set - cannot complete");
+                    debug!(
+                        "All parts received but missing proposer or block_hash - cannot complete"
+                    );
                 }
             } else {
                 debug!("Not all parts received yet");
@@ -1166,6 +1199,7 @@ pub struct ProposalParts {
     pub height: Height,
     pub round: Round,
     pub proposer: BasePeerAddress,
+    pub block_hash: B256,
     pub parts: Vec<ProposalPart>,
 }
 
@@ -1259,25 +1293,36 @@ pub fn reload_log_level(_height: Height, _round: Round) {
     // For now, do nothing - this would adjust log levels
 }
 
-/// Encode a value to its byte representation
-pub fn encode_value(value: &Value) -> Bytes {
+/// Encode a block to its byte representation
+pub fn encode_block(block: &reth_primitives::Block) -> Bytes {
     use reth_primitives_traits::serde_bincode_compat::SerdeBincodeCompat;
 
     // Convert block to its bincode-compatible representation
-    let block_repr = value.block.as_repr();
+    let block_repr = block.as_repr();
 
     // Serialize the block
     match bincode::serialize(&block_repr) {
         Ok(bytes) => Bytes::from(bytes),
         Err(e) => {
-            tracing::error!("Failed to encode value: {}", e);
+            tracing::error!("Failed to encode block: {}", e);
             Bytes::new()
         }
     }
 }
 
+/// Encode a value to its byte representation (now just returns the hash)
+pub fn encode_value(value: &Value) -> Bytes {
+    Bytes::from(value.hash().to_vec())
+}
+
 /// Re-assemble a [`ProposedValue`] from its [`ProposalParts`].
-fn assemble_value_from_parts(parts: ProposalParts) -> (ProposedValue<MalachiteContext>, Bytes) {
+/// Returns both the proposed value and the reconstructed block.
+fn assemble_value_from_parts(
+    parts: ProposalParts,
+) -> Result<(ProposedValue<MalachiteContext>, reth_primitives::Block)> {
+    // Extract the block hash from ProposalInit
+    let block_hash = parts.block_hash;
+
     // Calculate total size and allocate buffer
     let total_size: usize = parts
         .parts
@@ -1300,8 +1345,20 @@ fn assemble_value_from_parts(parts: ProposalParts) -> (ProposedValue<MalachiteCo
     // Convert the concatenated data vector into Bytes
     let data = Bytes::from(data);
 
-    // Decode the value from bytes
-    let value = decode_value(data.clone()).expect("Failed to decode reassembled proposal data");
+    // Decode the block from bytes
+    let block = decode_block(data).ok_or_else(|| eyre::eyre!("Failed to decode block data"))?;
+
+    // Verify the block hash matches what was announced
+    if block.header.hash_slow() != block_hash {
+        return Err(eyre::eyre!(
+            "Block hash mismatch: expected {}, got {}",
+            block_hash,
+            block.header.hash_slow()
+        ));
+    }
+
+    // Create the value from the hash
+    let value = Value::new(block_hash);
 
     let proposed_value = ProposedValue {
         height: parts.height,
@@ -1312,11 +1369,11 @@ fn assemble_value_from_parts(parts: ProposalParts) -> (ProposedValue<MalachiteCo
         validity: Validity::Valid,
     };
 
-    (proposed_value, data)
+    Ok((proposed_value, block))
 }
 
-/// Decode a value from its byte representation
-pub fn decode_value(bytes: Bytes) -> Option<Value> {
+/// Decode a block from its byte representation
+pub fn decode_block(bytes: Bytes) -> Option<reth_primitives::Block> {
     use reth_primitives_traits::serde_bincode_compat::SerdeBincodeCompat;
 
     // Deserialize the block representation
@@ -1325,14 +1382,68 @@ pub fn decode_value(bytes: Bytes) -> Option<Value> {
     ) {
         Ok(block_repr) => {
             // Convert from bincode-compatible representation back to Block
-            let block = reth_primitives::Block::from_repr(block_repr);
-            Some(Value::new(block))
+            Some(reth_primitives::Block::from_repr(block_repr))
         }
         Err(e) => {
-            tracing::error!("Failed to decode value: {}", e);
+            tracing::error!("Failed to decode block: {}", e);
             None
         }
     }
+}
+
+/// Decode a value from its byte representation (now expects a hash)
+pub fn decode_value(bytes: Bytes) -> Option<Value> {
+    if bytes.len() != 32 {
+        tracing::error!(
+            "Invalid value bytes length: expected 32, got {}",
+            bytes.len()
+        );
+        return None;
+    }
+
+    let hash = alloy_primitives::B256::from_slice(&bytes);
+    Some(Value::new(hash))
+}
+
+/// Encode a value and block together for sync purposes
+pub fn encode_value_with_block(value: &Value, block: &reth_primitives::Block) -> Bytes {
+    let mut data = Vec::new();
+
+    // First 32 bytes: the hash (value)
+    data.extend_from_slice(&value.hash().0);
+
+    // Remaining bytes: the serialized block
+    let block_bytes = encode_block(block);
+    data.extend_from_slice(&block_bytes);
+
+    Bytes::from(data)
+}
+
+/// Decode a value and block from sync data
+pub fn decode_value_with_block(bytes: Bytes) -> Option<(Value, reth_primitives::Block)> {
+    if bytes.len() < 32 {
+        tracing::error!(
+            "Sync data too short: expected at least 32 bytes, got {}",
+            bytes.len()
+        );
+        return None;
+    }
+
+    // First 32 bytes are the hash
+    let hash = alloy_primitives::B256::from_slice(&bytes[..32]);
+    let value = Value::new(hash);
+
+    // Remaining bytes are the block
+    let block_bytes = bytes.slice(32..);
+    let block = decode_block(block_bytes)?;
+
+    // Verify the block hash matches
+    if block.header.hash_slow() != hash {
+        tracing::error!("Block hash mismatch in sync data");
+        return None;
+    }
+
+    Some((value, block))
 }
 
 // Type alias for compatibility
@@ -1352,6 +1463,7 @@ mod tests {
             Height(1),
             Round::new(0),
             create_test_address(),
+            B256::from([1u8; 32]), // Test block hash
         ))
     }
 
@@ -1493,6 +1605,7 @@ mod tests {
             height: Height(10),
             round: Round::new(5),
             proposer: BasePeerAddress::from(address),
+            block_hash: B256::from([1u8; 32]),
             parts: vec![
                 create_test_proposal_init(),
                 create_test_proposal_data(b"data"),
@@ -1562,8 +1675,8 @@ mod tests {
         let block: Block = Block::default();
         let original_hash = block.header.hash_slow();
 
-        // Create a Value
-        let value = Value::new(block.clone());
+        // Create a Value from the block hash
+        let value = Value::from(&block);
 
         // Encode the value
         let encoded = encode_value(&value);
@@ -1572,8 +1685,8 @@ mod tests {
         // Decode the value
         let decoded = decode_value(encoded).expect("Should decode successfully");
 
-        // Check that the block is preserved
-        assert_eq!(decoded.block, block, "Block should be preserved");
+        // Check that the hash is preserved
+        assert_eq!(decoded.hash(), original_hash, "Hash should be preserved");
 
         // Check that the hash is correct
         assert_eq!(

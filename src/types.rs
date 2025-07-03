@@ -99,47 +99,44 @@ impl fmt::Display for ValueId {
 }
 
 /// The value to decide on
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Value {
-    pub block: Block,
-}
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Copy, Serialize, Deserialize)]
+pub struct Value(B256);
 
 impl Value {
-    /// Creates a new Value from a Block
-    pub fn new(block: Block) -> Self {
-        Self { block }
+    /// Creates a new Value from a hash
+    pub const fn new(hash: B256) -> Self {
+        Self(hash)
+    }
+
+    /// Creates a Value from a Block
+    pub fn from_block(block: &Block) -> Self {
+        Self(block.header.hash_slow())
+    }
+
+    /// Gets the hash
+    pub const fn hash(&self) -> B256 {
+        self.0
     }
 
     pub fn id(&self) -> ValueId {
-        ValueId::from(self.block.header.hash_slow())
+        ValueId::from(self.0)
     }
 
     pub fn size_bytes(&self) -> usize {
-        // Estimate size: header + body + rlp overhead
-        // This is an approximation
-        bincode::serialized_size(&self.block).unwrap_or(0) as usize
+        // A hash is always 32 bytes
+        32
     }
 }
 
-impl std::hash::Hash for Value {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.block.header.hash_slow().hash(state);
+impl From<B256> for Value {
+    fn from(hash: B256) -> Self {
+        Self(hash)
     }
 }
 
-// Manual Ord implementation based on block hash
-impl PartialOrd for Value {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for Value {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.block
-            .header
-            .hash_slow()
-            .cmp(&other.block.header.hash_slow())
+impl From<&Block> for Value {
+    fn from(block: &Block) -> Self {
+        Self::from_block(block)
     }
 }
 
@@ -215,19 +212,33 @@ impl ProposalPart {
 }
 
 /// A part of a value for a height, round. Identified in this scope by the sequence.
+///
+/// The `block_hash` field is used for verification purposes. Since consensus now operates
+/// on block hashes (Value == BlockHash) rather than full blocks, we need to ensure that
+/// the block data streamed in ProposalData chunks corresponds to the hash that validators
+/// are actually voting on. This prevents corruption or tampering during transmission.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ProposalInit {
     pub height: crate::height::Height,
     pub round: Round,
     pub proposer: Address,
+    /// The hash of the block being proposed. Used to verify that the reconstructed
+    /// block from ProposalData chunks matches the intended consensus value.
+    pub block_hash: B256,
 }
 
 impl ProposalInit {
-    pub fn new(height: crate::height::Height, round: Round, proposer: Address) -> Self {
+    pub fn new(
+        height: crate::height::Height,
+        round: Round,
+        proposer: Address,
+        block_hash: B256,
+    ) -> Self {
         Self {
             height,
             round,
             proposer,
+            block_hash,
         }
     }
 }

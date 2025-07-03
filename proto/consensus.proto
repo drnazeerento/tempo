@@ -60,6 +60,7 @@ message ProposalInit {
     uint32 round = 2;
     Address proposer = 4;
     optional uint32 pol_round = 5;
+    bytes block_hash = 6;
 }
 
 message ProposalData {

@@ -25,7 +25,7 @@ message ValueResponse {
 }
 
 message SyncedValue {
-    bytes value_bytes = 1;
+    bytes value_bytes = 1;  // Contains both hash and block using encode_value_with_block
     CommitCertificate certificate = 2;
 }
 

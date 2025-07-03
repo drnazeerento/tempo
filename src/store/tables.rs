@@ -6,6 +6,7 @@ use crate::{
     height::Height,
     Value,
 };
+use alloy_primitives::B256;
 use malachitebft_app_channel::app::types::ProposedValue;
 use malachitebft_codec::Codec;
 use malachitebft_core_types::{CommitCertificate, Round};
@@ -273,6 +274,88 @@ impl Decompress for StoredProposal {
     }
 }
 
+/// Key for storing blocks by hash
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct BlockKey(pub B256);
+
+impl From<B256> for BlockKey {
+    fn from(hash: B256) -> Self {
+        Self(hash)
+    }
+}
+
+/// Stored block data
+#[derive(Debug, Clone)]
+pub struct StoredBlock {
+    pub block: reth_primitives::Block,
+}
+
+// Manual serde implementation for StoredBlock (required by tables! macro but not used)
+impl Serialize for StoredBlock {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        // This is not actually used, as we implement Compress/Decompress
+        serializer.serialize_unit()
+    }
+}
+
+impl<'de> Deserialize<'de> for StoredBlock {
+    fn deserialize<D>(_deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // This is not actually used, as we implement Compress/Decompress
+        panic!("StoredBlock deserialization should use Decompress trait")
+    }
+}
+
+// Implement reth database traits for BlockKey
+impl Encode for BlockKey {
+    type Encoded = [u8; 32];
+
+    fn encode(self) -> Self::Encoded {
+        self.0 .0
+    }
+}
+
+impl Decode for BlockKey {
+    fn decode(value: &[u8]) -> Result<Self, DatabaseError> {
+        if value.len() != 32 {
+            return Err(DatabaseError::Decode);
+        }
+        let mut bytes = [0u8; 32];
+        bytes.copy_from_slice(value);
+        Ok(Self(B256::from(bytes)))
+    }
+}
+
+// Implement compression for StoredBlock
+impl Compress for StoredBlock {
+    type Compressed = Vec<u8>;
+
+    fn compress(self) -> Self::Compressed {
+        // Use our encode_block function to serialize the block
+        crate::app::encode_block(&self.block).to_vec()
+    }
+
+    fn compress_to_buf<B: bytes::BufMut + AsMut<[u8]>>(&self, buf: &mut B) {
+        let compressed = self.clone().compress();
+        buf.put_slice(&compressed);
+    }
+}
+
+impl Decompress for StoredBlock {
+    fn decompress(value: &[u8]) -> Result<Self, DatabaseError> {
+        // Use our decode_block function to deserialize the block
+        let block = crate::app::decode_block(bytes::Bytes::from(value.to_vec()))
+            .ok_or(DatabaseError::Decode)?;
+
+        Ok(StoredBlock { block })
+    }
+}
+
 // Define the tables
 tables! {
     /// Table for storing decided values (committed blocks)
@@ -291,5 +374,11 @@ tables! {
     table ConsensusState {
         type Key = Vec<u8>;
         type Value = Vec<u8>;
+    }
+
+    /// Table for storing blocks by hash
+    table Blocks {
+        type Key = BlockKey;
+        type Value = StoredBlock;
     }
 }

@@ -1,7 +1,8 @@
 //! Store wrapper for easier integration with the State module.
 
-use super::RethStore;
+use super::{BlockStore, RethStore};
 use crate::{context::MalachiteContext, height::Height, Value, ValueId};
+use alloy_primitives::B256;
 use eyre::Result;
 use malachitebft_app_channel::app::types::ProposedValue;
 use malachitebft_core_types::{CommitCertificate, Round};
@@ -61,11 +62,15 @@ impl Store {
         self.inner.get_undecided_proposals(height, round).await
     }
 
-    /// Store an undecided proposal
+    /// Store an undecided proposal along with its block
     pub async fn store_undecided_proposal(
         &self,
         proposal: ProposedValue<MalachiteContext>,
+        block: reth_primitives::Block,
     ) -> Result<()> {
+        // Store the block first
+        self.inner.store_block(block).await?;
+        // Then store the proposal that references it
         self.inner.store_undecided_proposal(proposal).await
     }
 
@@ -84,6 +89,26 @@ impl Store {
     /// Verify that all consensus tables exist in the database
     pub async fn verify_tables(&self) -> Result<()> {
         self.inner.verify_tables().await
+    }
+
+    /// Store a block indexed by its hash
+    pub async fn store_block(&self, block: reth_primitives::Block) -> Result<()> {
+        self.inner.store_block(block).await
+    }
+
+    /// Get a block by its hash
+    pub async fn get_block(&self, hash: &B256) -> Result<Option<reth_primitives::Block>> {
+        self.inner.get_block(hash).await
+    }
+
+    /// Check if a block exists by its hash
+    pub async fn has_block(&self, hash: &B256) -> Result<bool> {
+        self.inner.has_block(hash).await
+    }
+
+    /// Remove a block by its hash
+    pub async fn remove_block(&self, hash: &B256) -> Result<()> {
+        self.inner.remove_block(hash).await
     }
 }
 
@@ -139,6 +164,23 @@ trait StoreOps {
         height: Height,
         round: Round,
     ) -> Result<Vec<ProposedValue<MalachiteContext>>>;
+
+    // Block storage operations:
+
+    /// Store a block by its hash
+    async fn store_block(&self, block: reth_primitives::Block) -> Result<()>;
+
+    /// Get a block by its hash
+    async fn get_block(
+        &self,
+        hash: &alloy_primitives::B256,
+    ) -> Result<Option<reth_primitives::Block>>;
+
+    /// Check if a block exists
+    async fn has_block(&self, hash: &alloy_primitives::B256) -> Result<bool>;
+
+    /// Remove a block by its hash
+    async fn remove_block(&self, hash: &alloy_primitives::B256) -> Result<()>;
 }
 
 #[async_trait::async_trait]
@@ -198,5 +240,21 @@ where
 
     async fn verify_tables(&self) -> Result<()> {
         self.verify_tables().await.map_err(Into::into)
+    }
+
+    async fn store_block(&self, block: reth_primitives::Block) -> Result<()> {
+        BlockStore::store_block(self, block)
+    }
+
+    async fn get_block(&self, hash: &B256) -> Result<Option<reth_primitives::Block>> {
+        BlockStore::get_block(self, hash)
+    }
+
+    async fn has_block(&self, hash: &B256) -> Result<bool> {
+        BlockStore::has_block(self, hash)
+    }
+
+    async fn remove_block(&self, hash: &B256) -> Result<()> {
+        BlockStore::remove_block(self, hash)
     }
 }

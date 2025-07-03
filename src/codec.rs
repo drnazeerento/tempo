@@ -63,17 +63,24 @@ impl Codec<Value> for ProtoCodec {
 
     fn decode(&self, bytes: Bytes) -> Result<Value, Self::Error> {
         let proto = proto::Value::decode(bytes.as_ref())?;
-        // Decode the block from the proto value field
+        // Decode the hash from the proto value field
         let value_bytes = proto.value.unwrap_or_default();
-        crate::app::decode_value(value_bytes)
-            .ok_or_else(|| ProtoError::Other("Failed to decode block".to_string()))
+
+        if value_bytes.len() != 32 {
+            return Err(ProtoError::Other(format!(
+                "Invalid hash length: expected 32, got {}",
+                value_bytes.len()
+            )));
+        }
+
+        let hash = alloy_primitives::B256::from_slice(&value_bytes);
+        Ok(Value::new(hash))
     }
 
     fn encode(&self, msg: &Value) -> Result<Bytes, Self::Error> {
-        // Encode the block to bytes
-        let value_bytes = crate::app::encode_value(msg);
+        // Encode the hash to bytes
         let proto = proto::Value {
-            value: Some(value_bytes),
+            value: Some(Bytes::from(msg.hash().to_vec())),
         };
         Ok(Bytes::from(proto.encode_to_vec()))
     }
@@ -101,10 +108,13 @@ impl Codec<ProposalPart> for ProtoCodec {
                     ));
                 };
 
+                let block_hash = alloy_primitives::B256::from_slice(&init.block_hash);
+
                 Ok(ProposalPart::Init(crate::types::ProposalInit::new(
                     Height(init.height),
                     Round::new(init.round),
                     proposer_addr,
+                    block_hash,
                 )))
             }
             Some(proto::proposal_part::Part::Data(data)) => Ok(ProposalPart::Data(
@@ -134,6 +144,7 @@ impl Codec<ProposalPart> for ProtoCodec {
                         value: Bytes::from(init.proposer.as_bytes().to_vec()),
                     }),
                     pol_round: None, // Not used in our implementation
+                    block_hash: Bytes::from(init.block_hash.to_vec()),
                 })),
             },
             ProposalPart::Data(data) => proto::ProposalPart {
@@ -185,13 +196,22 @@ impl Codec<SignedConsensusMsg<MalachiteContext>> for ProtoCodec {
                 let value_data = value
                     .value
                     .ok_or_else(|| ProtoError::missing_field::<proto::Value>("value"))?;
-                let block_value = crate::app::decode_value(value_data)
-                    .ok_or_else(|| ProtoError::Other("Failed to decode block value".to_string()))?;
+
+                // Now we expect a hash, not a full block
+                if value_data.len() != 32 {
+                    return Err(ProtoError::Other(format!(
+                        "Invalid value hash length: expected 32, got {}",
+                        value_data.len()
+                    )));
+                }
+
+                let hash = alloy_primitives::B256::from_slice(&value_data);
+                let value = Value::new(hash);
 
                 let base_proposal = crate::context::BaseProposal {
                     height: Height(proposal.height),
                     round: crate::context::RoundWrapper(Round::new(proposal.round)),
-                    value: block_value,
+                    value,
                     proposer: proposer_addr,
                     parts: vec![], // Parts are sent separately via streaming
                     pol_round: crate::context::RoundWrapper(
@@ -869,10 +889,12 @@ mod tests {
         let codec = ProtoCodec;
 
         // Test ProposalInit
+        let block_hash = B256::from([42u8; 32]);
         let init = ProposalPart::Init(crate::types::ProposalInit::new(
             Height(100),
             Round::new(1),
             test_address(),
+            block_hash,
         ));
         let encoded = codec.encode(&init).unwrap();
         let decoded: ProposalPart = codec.decode(encoded).unwrap();
@@ -930,10 +952,12 @@ mod tests {
         let codec = ProtoCodec;
 
         // Test with data content
+        let block_hash = B256::from([99u8; 32]);
         let part = ProposalPart::Init(crate::types::ProposalInit::new(
             Height(200),
             Round::new(2),
             test_address(),
+            block_hash,
         ));
 
         let stream_msg = StreamMessage {
@@ -1066,7 +1090,7 @@ mod tests {
         }
 
         // Test our codec with the updated encode/decode functions
-        let value = Value::new(block);
+        let value = Value::from(&block);
         let codec = ProtoCodec;
 
         let encoded = codec.encode(&value).unwrap();
@@ -1074,6 +1098,6 @@ mod tests {
 
         let decoded: Value = codec.decode(encoded).unwrap();
         println!("Successfully decoded value");
-        assert_eq!(value.block, decoded.block);
+        assert_eq!(value.hash(), decoded.hash());
     }
 }
