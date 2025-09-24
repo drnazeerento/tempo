@@ -3,7 +3,7 @@
 use std::{sync::Arc, time::SystemTime};
 
 use alloy_primitives::B256;
-use alloy_rpc_types_engine::{ForkchoiceState, PayloadId};
+use alloy_rpc_types_engine::PayloadId;
 use commonware_consensus::{Automaton, Block as _, Relay, Reporter, marshal};
 use commonware_runtime::{Clock, Handle, Metrics, Spawner, Storage};
 
@@ -26,7 +26,7 @@ use tracing::{Level, info, instrument};
 
 use tempo_commonware_node_cryptography::{BlsScheme, Digest};
 
-mod finalizer;
+mod executor;
 
 use super::{View, block::Block};
 
@@ -65,15 +65,6 @@ where
             .and_then(|maybe| maybe.ok_or_eyre("block reader returned empty genesis block"))
             .wrap_err("failed reading genesis block from execution node")?;
 
-        let finalizer = finalizer::Builder {
-            execution_node: self.execution_node.clone(),
-        }
-        .build();
-        let to_finalizer = finalizer.mailbox().clone();
-
-        self.context
-            .with_label("finalizer")
-            .spawn(move |_| finalizer.run());
         Ok(ExecutionDriver {
             context: self.context,
 
@@ -89,7 +80,7 @@ where
 
             execution_node: self.execution_node,
 
-            to_finalizer,
+            executor_mailbox: None,
         })
     }
 }
@@ -109,7 +100,7 @@ pub struct ExecutionDriver<TContext> {
 
     execution_node: TempoFullNode,
 
-    to_finalizer: finalizer::Mailbox,
+    executor_mailbox: Option<executor::ExecutorMailbox>,
 }
 
 impl<TContext> ExecutionDriver<TContext>
@@ -121,13 +112,12 @@ where
     }
 
     async fn run(mut self) {
-        // XXX: relying on instrumentation to emit an error event
-        // TODO(janis): this should be placed under a shutdown signal so
-        // we don't just stall on startup. We don't have shutdown signals yet
-        // though.
-        if self.initialize_latest_finalized_block().await.is_err() {
+        // TODO(janis): should be placed under a shutdown signal so we don't
+        // just stall on startup.
+        // XXX: relies on runtime_init generating an error event before exit.
+        if self.runtime_init().await.is_err() {
             return;
-        }
+        };
 
         loop {
             tokio::select!(
@@ -153,49 +143,40 @@ where
         self.context.spawn_ref()(self.run())
     }
 
+    /// Initializes the execution driver's constituent task with information only available at runtime.
+    ///
+    /// This includes:
+    ///
+    /// 1. reading the last finalized digest from the consensus marshaller.
+    /// 2. starting the finalizer task and storing its handle.
     #[instrument(skip_all, err)]
-    async fn initialize_latest_finalized_block(&mut self) -> eyre::Result<()> {
-        let Some((finalized_height, finalized_digest)) =
-            // TODO(janis): does this have the potential to stall indefinitely?
-            // If so, we should have some kind of heartbeat to inform telemetry.
-            self.syncer_mailbox.get_finalized().await.await.unwrap()
-        else {
-            info!(
-                "consensus returned that there is no finalized height or digest, this means we are still at genesis"
-            );
-            return Ok(());
-        };
+    async fn runtime_init(&mut self) -> eyre::Result<()> {
+        // TODO(janis): does this have the potential to stall indefinitely?
+        // If so, we should have some kind of heartbeat to inform telemetry.
+        let (finalized_height, finalized_digest) = self
+            .syncer_mailbox
+            .get_finalized()
+            .await
+            .await
+            .wrap_err("consensus dropped channel before returning the last finalized block")?
+            .unwrap_or_else(|| (0, self.genesis_block.digest()));
+
         info!(
             finalized_height,
             %finalized_digest,
             "consensus returned last finalized block, sending to execution layer",
         );
 
-        let finalized_hash = finalized_digest.0;
-        let fcu_response = self
-            .execution_node
-            .add_ons_handle
-            .beacon_engine_handle
-            .fork_choice_updated(
-                ForkchoiceState {
-                    head_block_hash: finalized_hash,
-                    safe_block_hash: finalized_hash,
-                    finalized_block_hash: finalized_hash,
-                },
-                None,
-                reth_node_builder::EngineApiMessageVersion::V3,
-            )
-            .await
-            .wrap_err(
-                "failed running engine_forkchoiceUpdated to set the \
-                    finalized block hash",
-            )?;
+        let finalizer = executor::Builder {
+            execution_node: self.execution_node.clone(),
+            latest_finalized_digest: finalized_digest,
+        }
+        .build();
+        claims::assert_none!(self.executor_mailbox.replace(finalizer.mailbox().clone()));
 
-        ensure!(
-            fcu_response.is_valid() || fcu_response.is_syncing(),
-            "payload status of forkchoice update response was neither valid nor syncing: `{}`",
-            fcu_response.payload_status,
-        );
+        self.context
+            .with_label("finalizer")
+            .spawn(move |_| finalizer.run());
 
         Ok(())
     }
@@ -249,7 +230,10 @@ where
 
     /// Pushes a `finalized` request to the back of the finalization queue.
     fn handle_finalized(&self, finalized: Finalized) -> eyre::Result<()> {
-        self.to_finalizer.finalize(finalized)
+        self.executor_mailbox
+            .as_ref()
+            .expect("handle_finalized must only be called from ExecutionDriver's event loop and only after the finalizer task was initialized")
+            .forward_finalized(finalized)
     }
 
     #[instrument(
@@ -295,6 +279,10 @@ where
             latest_proposed_block: self.latest_proposed_block.clone(),
             execution_node: self.execution_node.clone(),
             syncer_mailbox: self.syncer_mailbox.clone(),
+            executor_mailbox: self.executor_mailbox.clone()
+                .expect(
+                    "propose must only be called from within the ExecutionDriver's event loop and only after the executor task was initialized"
+                ),
         }
     }
 
@@ -316,16 +304,14 @@ where
             parent.view = verify.parent.0,
             parent.digest = %verify.parent.1,
         ),
-        err
     )]
-    fn verify(&self, verify: Verify) -> impl Future<Output = eyre::Result<()>> + 'static {
-        let engine = self
-            .execution_node
-            .add_ons_handle
-            .beacon_engine_handle
-            .clone();
+    fn verify(&self, verify: Verify) -> impl Future<Output = ()> + 'static {
+        let execution_node = self.execution_node.clone();
         let genesis_block = self.genesis_block.clone();
         let mut syncer_mailbox = self.syncer_mailbox.clone();
+        let executor_mailbox = self.executor_mailbox
+            .clone()
+            .expect("verify must only be called from within the ExecutionDriver's event loop and only after executor agent was initialized");
 
         // XXX: this async block MUST remain the last expression. This code
         // makes use of how tracing evaluates function bodies to determine
@@ -346,6 +332,13 @@ where
             } = verify;
 
             let verification_fut = async {
+                if let Err(error) = executor_mailbox.canonicalize(parent.1) {
+                    tracing::warn!(
+                        %error,
+                        "failed updating canonical chain to proposal parent",
+                    );
+                }
+
                 let parent_request = if parent.1 == genesis_block.digest() {
                     Either::Left(futures_util::future::always_ready({
                         move || Ok((*genesis_block).clone())
@@ -368,13 +361,17 @@ where
                     .await
                     .wrap_err("failed getting required blocks from syncer")?;
 
-                let is_good = verify_block(engine, &block, &parent)
-                    .await
-                    .wrap_err("failed verifying block against execution layer")?;
+                let is_good = verify_block(
+                    execution_node.add_ons_handle.beacon_engine_handle.clone(),
+                    &block,
+                    &parent,
+                )
+                .await
+                .wrap_err("failed verifying block against execution layer")?;
                 Ok::<_, eyre::Report>((block, is_good))
             };
 
-            let (block, is_good) = tokio::select!(
+            let result = tokio::select!(
                 biased;
 
                 () = response.cancellation() => {
@@ -387,23 +384,22 @@ where
                 res = verification_fut => {
                     res.wrap_err("block verification failed")
                 }
-            )?;
+            );
 
-            // XXX: storing the verified block is moved outside the
-            // previous select! statement such that valid blocks are
-            // always cached.
-            if is_good {
+            // 1. respond with the verification result ASAP. Also generates
+            // the event reporting the result of the verification.
+            let _ = report_verification_result(response, &result);
+
+            // 2. make the forkchoice state available && cache the block
+            if let Ok((block, true)) = result {
+                if let Err(error) = executor_mailbox.canonicalize(payload) {
+                    tracing::warn!(
+                        %error,
+                        "failed updating canonical chain to proposal",
+                    );
+                }
                 syncer_mailbox.verified(view, block).await;
             }
-
-            response.send(is_good).map_err(|_| {
-                eyre!(
-                    "attempted to send return verification result, but \
-                        receiver already dropped the channel"
-                )
-            })?;
-
-            Ok::<(), eyre::Report>(())
         }
     }
 }
@@ -416,6 +412,7 @@ struct RunPropose {
     latest_proposed_block: Arc<RwLock<Option<Block>>>,
     execution_node: TempoFullNode,
     syncer_mailbox: marshal::Mailbox<BlsScheme, Block>,
+    executor_mailbox: executor::ExecutorMailbox,
 }
 
 impl RunPropose {
@@ -437,6 +434,7 @@ impl RunPropose {
             latest_proposed_block,
             execution_node,
             mut syncer_mailbox,
+            executor_mailbox,
         } = self;
         let Propose {
             view: _view,
@@ -444,7 +442,14 @@ impl RunPropose {
             mut response,
         } = request;
 
+        let executor_mailbox_clone = executor_mailbox.clone();
         let proposal_fut = async move {
+            if let Err(error) = executor_mailbox_clone.canonicalize(parent.1) {
+                tracing::warn!(
+                    %error,
+                    "failed updating canonical chain to proposal parent",
+                );
+            }
             let parent_request = if parent.1 == genesis_block.digest() {
                 Either::Left(futures_util::future::always_ready({
                     move || Ok((*genesis_block).clone())
@@ -532,7 +537,7 @@ impl RunPropose {
                     "proposal return channel was closed by consensus \
                     engine before block could be proposed; aborting"
                 ))
-            }
+           }
 
             res = proposal_fut => {
                 res.wrap_err("failed creating a proposal")
@@ -548,6 +553,13 @@ impl RunPropose {
         {
             let mut lock = latest_proposed_block.write().await;
             *lock = Some(consensus_block);
+        }
+
+        if let Err(error) = executor_mailbox.canonicalize(proposed_block_digest) {
+            tracing::warn!(
+                %error,
+                "failed updating canonical chain to proposed block",
+            );
         }
 
         Ok::<(), eyre::Report>(())
@@ -806,4 +818,36 @@ fn payload_id_from_block_hash(block_hash: &B256) -> PayloadId {
         <[u8; 8]>::try_from(&block_hash[0..8])
             .expect("a 32 byte array always has more than 8 bytes"),
     )
+}
+
+/// Reports the verification result as a tracing event and consensus response.
+///
+/// This means either sending true/false if a decision could be rendered, or
+/// dropping the channel, if not.
+#[instrument(skip_all, err)]
+fn report_verification_result(
+    response: oneshot::Sender<bool>,
+    verification_result: &eyre::Result<(Block, bool)>,
+) -> eyre::Result<()> {
+    match &verification_result {
+        Ok((_, is_good)) => {
+            info!(
+                proposal_valid = is_good,
+                "returning proposal verification result to consensus",
+            );
+            response.send(*is_good).map_err(|_| {
+                eyre!(
+                    "attempted to send return verification result, but \
+                        receiver already dropped the channel"
+                )
+            })?;
+        }
+        Err(error) => {
+            info!(
+                %error,
+                "could not decide proposal, dropping response channel",
+            );
+        }
+    }
+    Ok(())
 }
